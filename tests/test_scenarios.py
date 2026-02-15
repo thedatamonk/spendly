@@ -18,17 +18,6 @@ from app.models.schemas import LLMResponse, Obligation
 SEPARATOR = "=" * 60
 LOG_FILE = Path(__file__).parent / "results.log"
 
-
-"""
-More scenarios to come
-"messages": [
-    "Payment to be recieved from Ananya",
-    // Agent finds existing records from Ananya, confirms the users if I have to update something in them
-    //"If not existing records are found, then agent asks the missing details from the user.
-
-]
-
-"""
 SCENARIOS = [
     {
         "name": "Equal split - petrol with Shivam",
@@ -43,7 +32,6 @@ SCENARIOS = [
             "8900rs",
         ],
     },
-    # scenario 3 is failing...it's not including me in the bill split
     {
         "name": "Unequal split - stress test",
         "messages": [
@@ -53,7 +41,6 @@ SCENARIOS = [
         ],
     },
     # ── Adversarial scenarios ───────────────────────────────────────
-    # We also need to test if I can set up a different installment amount?? Currently the agent assumes that it will be for 1 month.
     {
         "name": "Recurring advance with multiple amounts — Anita double advance",
         "messages": [
@@ -75,7 +62,6 @@ SCENARIOS = [
         ],
     },
 
-    # We need to add another marker in the UI to show that I owe someone this much money
     {
         "name": "Reversed direction — user owes someone else",
         "messages": [
@@ -83,8 +69,6 @@ SCENARIOS = [
         ],
     },
 
-    # Here also the agent assumed that the money needs to be recovered in 6 months. Need to test if the agent can handle the scenario if I 
-    # ask it to set a different duration.
     {
         "name": "Hinglish input",
         "messages": [
@@ -92,7 +76,6 @@ SCENARIOS = [
         ],
     },
 
-    # The agent shouldn't have answered this question.
     {
         "name": "Off-topic / non-financial message",
         "messages": [
@@ -100,7 +83,6 @@ SCENARIOS = [
         ],
     },
 
-    # Same issue...I am not included in the user count.
     {
         "name": "Head-count split math — user included in count",
         "messages": [
@@ -108,7 +90,6 @@ SCENARIOS = [
             "4 people — me, Kunal, Priya and Sid. Split equally.",
         ],
     },
-    # The LLM did the math properly, but did not include the user again in the calculation plus the total amount due was also incorrect. Did not add it in the response.
     {
         "name": "Tip/tax on top of base — derived arithmetic",
         "messages": [
@@ -117,8 +98,6 @@ SCENARIOS = [
         ],
     },
 
-    # Agent was able to identify the intent, but not sure if it updated the DB correctly or not?
-    # Need to add multiple turns here.
     {
         "name": "Partial settlement — Sunita paid 2000",
         "context": [
@@ -133,11 +112,9 @@ SCENARIOS = [
         ],
         "messages": [
             "Sunita ne 2000 de diye",
+            "Abhi Sunita ke kitna amount due hai?"
         ],
     },
-
-    # The agent failed to understand the intent and is hallucinating the remaining amount
-    # to 3800..How? Why?
     {
         "name": "Edit existing obligation — change monthly deduction",
         "context": [
@@ -155,7 +132,6 @@ SCENARIOS = [
         ],
     },
     # ── Settlement scenarios ─────────────────────────────────────────
-    # Need to check if DB got updated or not in this case.
     {
         "name": "Full settlement — Shivam paid back",
         "context": [
@@ -175,7 +151,6 @@ SCENARIOS = [
         "name": "Chitchat — simple greeting",
         "messages": ["Hi!"],
     },
-    # Agent should ask which obligation are we talking about?
     {
         "name": "Settle with multiple obligations — Anjali partial",
         "context": [
@@ -198,6 +173,125 @@ SCENARIOS = [
             "Anjali just paid 1000 for the brunch",
         ],
     },
+    # ── New coverage scenarios ─────────────────────────────────────
+    {
+        "name": "Delete obligation — remove Rahul's entry",
+        "context": [
+            Obligation(
+                person_name="Rahul",
+                type="one_time",
+                total_amount=5000,
+                remaining_amount=5000,
+                note="Concert tickets",
+            ),
+        ],
+        "messages": [
+            "Delete Rahul's concert tickets entry",
+        ],
+    },
+    {
+        "name": "Edit total amount — Anita's advance was actually 6000",
+        "context": [
+            Obligation(
+                person_name="Anita",
+                type="recurring",
+                total_amount=5800,
+                remaining_amount=5800,
+                expected_per_cycle=1000,
+                note="Phone advance",
+            ),
+        ],
+        "messages": [
+            "Actually Anita's total was 6000, not 5800. Update it.",
+        ],
+    },
+    {
+        "name": "Edit note — update Shivam's note",
+        "context": [
+            Obligation(
+                person_name="Shivam",
+                type="one_time",
+                total_amount=3500,
+                remaining_amount=3500,
+                note="Petrol charges",
+            ),
+        ],
+        "messages": [
+            "Change Shivam's note to 'Petrol + toll charges'",
+        ],
+    },
+    {
+        "name": "Query — how much does Kunal owe",
+        "messages": [
+            "How much does Kunal owe me?",
+        ],
+    },
+    {
+        "name": "Settle i_owe — paid Rahul back",
+        "context": [
+            Obligation(
+                person_name="Rahul",
+                type="one_time",
+                direction="i_owe",
+                total_amount=5000,
+                remaining_amount=5000,
+                note="Concert tickets",
+            ),
+        ],
+        "messages": [
+            "I paid Rahul the 5000 I owed him for concert tickets",
+        ],
+    },
+    {
+        "name": "Delete with disambiguation — Anjali has two obligations",
+        "context": [
+            Obligation(
+                person_name="Anjali",
+                type="one_time",
+                total_amount=1000,
+                remaining_amount=1000,
+                note="Brunch at Daddy's",
+            ),
+            Obligation(
+                person_name="Anjali",
+                type="one_time",
+                total_amount=2500,
+                remaining_amount=2500,
+                note="Movie tickets",
+            ),
+        ],
+        "messages": [
+            "Delete Anjali's movie tickets entry",
+        ],
+    },
+    {
+        "name": "Edit with disambiguation — Anjali update amount",
+        "context": [
+            Obligation(
+                person_name="Anjali",
+                type="one_time",
+                total_amount=1000,
+                remaining_amount=1000,
+                note="Brunch at Daddy's",
+            ),
+            Obligation(
+                person_name="Anjali",
+                type="one_time",
+                total_amount=2500,
+                remaining_amount=2500,
+                note="Movie tickets",
+            ),
+        ],
+        "messages": [
+            "Anjali's movie tickets were actually 3000, update it",
+        ],
+    },
+    {
+        "name": "Query — what's pending overall",
+        "messages": [
+            "Show me all pending dues",
+        ],
+    },
 ]
 
 
@@ -210,10 +304,13 @@ def _intent_summary(result: LLMResponse) -> str:
     parts = [
         f"action={p.action}",
         f"persons=[{', '.join(persons)}]",
+        f"direction={p.direction}",
         f"amount={p.amount}",
         f"type={p.obligation_type}",
         f"ambiguous={str(p.is_ambiguous).lower()}",
     ]
+    if p.note:
+        parts.append(f'note="{p.note}"')
     if p.expected_per_cycle is not None:
         parts.append(f"per_cycle={p.expected_per_cycle}")
     if p.clarifying_question:

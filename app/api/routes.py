@@ -64,6 +64,9 @@ def update_obligation(obligation_id: int, request: UpdateObligationRequest):
         raise HTTPException(status_code=404, detail="Obligation not found")
 
     updates = request.model_dump(exclude_none=True)
+    if "total_amount" in updates:
+        already_paid = existing.total_amount - existing.remaining_amount
+        updates["remaining_amount"] = max(updates["total_amount"] - already_paid, 0)
     updated = repo.update(obligation_id, **updates)
     logger.info("Updated obligation #{}", obligation_id)
     return updated
@@ -84,6 +87,11 @@ def add_transaction(obligation_id: int, request: AddTransactionRequest):
         raise HTTPException(status_code=404, detail="Obligation not found")
     if existing.status == "settled":
         raise HTTPException(status_code=400, detail="Obligation is already settled")
+    if existing.type == "one_time" and request.amount != existing.remaining_amount:
+        raise HTTPException(
+            status_code=400,
+            detail="One-time obligations must be settled in full",
+        )
 
     transaction = Transaction(
         amount=request.amount,

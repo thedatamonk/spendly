@@ -38,6 +38,7 @@ Rules:
 9. Use conversation history (prior messages) for context when handling follow-up messages. If the user already provided a name, amount, or other detail in an earlier message, do not re-ask for it — combine the information to produce a complete action
 10. If the message is a greeting or casual conversation (e.g. "Hi", "Hello", "How are you", "Thanks"), set action to "chitchat", all financial fields to null, requires_confirmation to false, and reply with a friendly conversational response in confirmation_message
 11. If the message is off-topic / non-financial (e.g. "Remind me to call mom", "What's the weather"), set action to "off_topic", all financial fields to null, requires_confirmation to false, and politely redirect the user to financial features in confirmation_message
+12. For "edit" actions, populate only the field being changed (expected_per_cycle, amount, or note) and leave others null
 
 Examples:
 
@@ -183,6 +184,78 @@ Output:
   },
   "confirmation_message": "You owe Rahul ₹5,000 for concert tickets. Should I log this?",
   "requires_confirmation": true
+}
+
+Input: "How much does Sunita owe me?"
+Output:
+{
+  "parsed": {
+    "action": "query",
+    "persons": ["Sunita"],
+    "direction": "owes_me",
+    "amount": null,
+    "obligation_type": null,
+    "expected_per_cycle": null,
+    "note": null,
+    "is_ambiguous": false,
+    "clarifying_question": null
+  },
+  "confirmation_message": "Let me check Sunita's pending obligations.",
+  "requires_confirmation": false
+}
+
+Input: "Mark Shivam's record as settled"
+Output:
+{
+  "parsed": {
+    "action": "settle",
+    "persons": ["Shivam"],
+    "direction": "owes_me",
+    "amount": null,
+    "obligation_type": null,
+    "expected_per_cycle": null,
+    "note": null,
+    "is_ambiguous": false,
+    "clarifying_question": null
+  },
+  "confirmation_message": "Mark Shivam's obligation as fully settled?",
+  "requires_confirmation": true
+}
+
+Input: "Change Sunita's monthly deduction to 1500"
+Output:
+{
+  "parsed": {
+    "action": "edit",
+    "persons": ["Sunita"],
+    "direction": "owes_me",
+    "amount": null,
+    "obligation_type": null,
+    "expected_per_cycle": 1500,
+    "note": null,
+    "is_ambiguous": false,
+    "clarifying_question": null
+  },
+  "confirmation_message": "Update Sunita's monthly deduction to ₹1,500?",
+  "requires_confirmation": true
+}
+
+Input: "What's the total amount Shivam owes me?"
+Output:
+{
+  "parsed": {
+    "action": "query",
+    "persons": ["Shivam"],
+    "direction": "owes_me",
+    "amount": null,
+    "obligation_type": null,
+    "expected_per_cycle": null,
+    "note": null,
+    "is_ambiguous": false,
+    "clarifying_question": null
+  },
+  "confirmation_message": "Let me check Shivam's pending obligations.",
+  "requires_confirmation": false
 }
 
 IMPORTANT: Return ONLY valid JSON. No markdown, no code fences, no explanation text.\

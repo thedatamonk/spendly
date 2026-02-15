@@ -86,6 +86,102 @@ def _pending_summary(obligations: list[Obligation]) -> str:
     return "\n".join(lines)
 
 
+def _build_obligation_label(ob: Obligation) -> str:
+    """One-line label for an obligation: '₹5,800 (recurring) — Phone advance'."""
+    label = _format_inr(ob.remaining_amount)
+    if ob.type == "recurring":
+        label += " (recurring)"
+    if ob.note:
+        label += f" — {ob.note}"
+    return label
+
+
+def _serialize_obligation(ob: Obligation) -> dict:
+    """Serialize an Obligation to a JSON-safe dict for storage in user_data."""
+    data = ob.model_dump()
+    # Convert datetime fields to ISO strings
+    data["created_at"] = data["created_at"].isoformat()
+    for txn in data.get("transactions", []):
+        txn["paid_at"] = txn["paid_at"].isoformat()
+    return data
+
+
+def _deserialize_obligation(data: dict) -> Obligation:
+    """Deserialize an Obligation from a stored dict."""
+    data["created_at"] = datetime.fromisoformat(data["created_at"])
+    for txn in data.get("transactions", []):
+        txn["paid_at"] = datetime.fromisoformat(txn["paid_at"])
+    return Obligation(**data)
+
+
+async def _show_disambiguation(
+    query, matches: list[Obligation], action_data: dict,
+    context: ContextTypes.DEFAULT_TYPE, person: str,
+) -> None:
+    """Present an inline keyboard for the user to pick one obligation."""
+    buttons = []
+    for i, ob in enumerate(matches):
+        buttons.append(
+            [InlineKeyboardButton(
+                _build_obligation_label(ob), callback_data=f"choose_{i}"
+            )]
+        )
+    buttons.append(
+        [InlineKeyboardButton("Cancel", callback_data="choose_cancel")]
+    )
+
+    context.user_data["pending_choice"] = {
+        "action_data": action_data,
+        "matches": [_serialize_obligation(ob) for ob in matches],
+        "person": person,
+    }
+
+    await query.edit_message_text(
+        f"{person} has {len(matches)} active obligations. Which one?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    context.user_data["pending_message_id"] = query.message.message_id
+
+
+async def _handle_choice(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle a disambiguation choice callback."""
+    context.user_data.pop("pending_message_id", None)
+    choice_data = context.user_data.pop("pending_choice", None)
+    if not choice_data:
+        await query.edit_message_text("Session expired. Please send a new message.")
+        return
+
+    if query.data == "choose_cancel":
+        await query.edit_message_text("Cancelled.")
+        return
+
+    idx = int(query.data.split("_")[1])
+    matches = [_deserialize_obligation(d) for d in choice_data["matches"]]
+    if idx < 0 or idx >= len(matches):
+        await query.edit_message_text("Invalid choice. Please try again.")
+        return
+
+    ob = matches[idx]
+    action_data = choice_data["action_data"]
+    action = action_data["action"]
+
+    try:
+        if action == "settle":
+            await _execute_settle_single(
+                query, ob, action_data.get("amount"), action_data.get("note")
+            )
+        elif action == "edit":
+            await _execute_edit_single(query, ob, action_data)
+        elif action == "delete":
+            repo.delete(ob.id)
+            await query.edit_message_text(
+                f"Deleted obligation for {choice_data['person']}: {_build_obligation_label(ob)}"
+            )
+    except Exception as e:
+        logger.error("Error executing choice action: {}", e)
+        await query.edit_message_text(f"Something went wrong: {e}")
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     await update.message.reply_text(
@@ -136,6 +232,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming text messages — the main conversation entry point."""
     user_text = update.message.text.strip()
     logger.info("Telegram message: {}", user_text)
+
+    # Clear any pending inline-keyboard state from a previous interaction
+    stale_msg_id = context.user_data.pop("pending_message_id", None)
+    had_pending = context.user_data.pop("pending_action", None)
+    had_choice = context.user_data.pop("pending_choice", None)
+    if stale_msg_id and (had_pending or had_choice):
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=update.message.chat_id,
+                message_id=stale_msg_id,
+                reply_markup=None,
+            )
+        except Exception:
+            pass  # Message may have been deleted or already edited
 
     # Send typing indicator
     await update.message.chat.send_action("typing")
@@ -195,9 +305,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             ]
         )
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             llm_result.confirmation_message, reply_markup=keyboard
         )
+        context.user_data["pending_message_id"] = sent.message_id
         return
 
     # No confirmation needed and no parsed action — just relay the message
@@ -229,18 +340,25 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle Yes/No button presses for confirmation."""
+    """Handle Yes/No button presses and disambiguation choices."""
     query = update.callback_query
     await query.answer()
 
+    # Disambiguation choice
+    if query.data and query.data.startswith("choose_"):
+        await _handle_choice(query, context)
+        return
+
     if query.data == "confirm_no":
         context.user_data.pop("pending_action", None)
+        context.user_data.pop("pending_message_id", None)
         context.user_data.pop("history", None)
         await query.edit_message_text(query.message.text + "\n\n_Cancelled._", parse_mode="Markdown")
         return
 
     # confirm_yes
     action_data = context.user_data.pop("pending_action", None)
+    context.user_data.pop("pending_message_id", None)
     context.user_data.pop("history", None)
     if not action_data:
         await query.edit_message_text("Nothing to confirm. Send a new message.")
@@ -260,13 +378,11 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                 query, persons, amount, obligation_type, expected_per_cycle, note, direction
             )
         elif action == "settle":
-            await _execute_settle(query, persons, amount, note)
+            await _execute_settle(query, persons, amount, note, context=context, action_data=action_data)
         elif action == "delete":
-            await _execute_delete(query, persons)
+            await _execute_delete(query, persons, context=context, action_data=action_data)
         elif action == "edit":
-            await query.edit_message_text(
-                "Edit support coming soon! For now, use the web dashboard."
-            )
+            await _execute_edit(query, persons, action_data, context=context)
         else:
             await query.edit_message_text("I'm not sure what to do with that.")
     except Exception as e:
@@ -318,8 +434,24 @@ async def _execute_add(query, persons, amount, obligation_type, expected_per_cyc
     await query.edit_message_text(f"Done! Added: {', '.join(created_names)}")
 
 
-async def _execute_settle(query, persons, amount, note):
-    """Execute a settle action — full or partial."""
+async def _execute_settle_single(query, ob: Obligation, amount, note):
+    """Settle a single obligation — full or partial."""
+    if amount and amount < ob.remaining_amount and ob.type != "one_time":
+        txn = Transaction(amount=amount, paid_at=datetime.now(), note=note)
+        updated = repo.add_transaction(ob.id, txn)
+        await query.edit_message_text(
+            f"{ob.person_name}: paid {_format_inr(amount)}, "
+            f"{_format_inr(updated.remaining_amount)} remaining."
+        )
+    else:
+        repo.settle(ob.id)
+        await query.edit_message_text(
+            f"{ob.person_name}: settled {_format_inr(ob.remaining_amount)}!"
+        )
+
+
+async def _execute_settle(query, persons, amount, note, *, context=None, action_data=None):
+    """Execute a settle action — full or partial, with disambiguation if needed."""
     if not persons:
         await query.edit_message_text("Couldn't determine who paid. Please try again.")
         return
@@ -331,9 +463,12 @@ async def _execute_settle(query, persons, amount, note):
             results.append(f"No active obligation found for {person}.")
             continue
 
-        ob = matches[0]  # Take the first active match
-        if amount and amount < ob.remaining_amount:
-            # Partial payment
+        if len(matches) > 1 and context is not None and action_data is not None:
+            await _show_disambiguation(query, matches, action_data, context, person)
+            return
+
+        ob = matches[0]
+        if amount and amount < ob.remaining_amount and ob.type != "one_time":
             txn = Transaction(amount=amount, paid_at=datetime.now(), note=note)
             updated = repo.add_transaction(ob.id, txn)
             results.append(
@@ -341,15 +476,64 @@ async def _execute_settle(query, persons, amount, note):
                 f"{_format_inr(updated.remaining_amount)} remaining."
             )
         else:
-            # Full settlement
             repo.settle(ob.id)
             results.append(f"{person}: settled {_format_inr(ob.remaining_amount)}!")
 
     await query.edit_message_text("\n".join(results))
 
 
-async def _execute_delete(query, persons):
-    """Execute a delete action."""
+async def _execute_edit_single(query, ob: Obligation, action_data: dict):
+    """Apply edits to a single obligation."""
+    updates = {}
+    changes = []
+
+    if action_data.get("expected_per_cycle") is not None:
+        updates["expected_per_cycle"] = action_data["expected_per_cycle"]
+        changes.append(f"monthly deduction → {_format_inr(action_data['expected_per_cycle'])}")
+
+    if action_data.get("amount") is not None:
+        new_total = action_data["amount"]
+        already_paid = ob.total_amount - ob.remaining_amount
+        new_remaining = max(new_total - already_paid, 0)
+        updates["total_amount"] = new_total
+        updates["remaining_amount"] = new_remaining
+        changes.append(f"total → {_format_inr(new_total)} ({_format_inr(new_remaining)} remaining)")
+
+    if action_data.get("note") is not None:
+        updates["note"] = action_data["note"]
+        changes.append(f"note → {action_data['note']}")
+
+    if not updates:
+        await query.edit_message_text("No changes to apply.")
+        return
+
+    repo.update(ob.id, **updates)
+    await query.edit_message_text(
+        f"Updated {ob.person_name}: {'; '.join(changes)}"
+    )
+
+
+async def _execute_edit(query, persons, action_data, *, context=None):
+    """Execute an edit action, with disambiguation if needed."""
+    if not persons:
+        await query.edit_message_text("Couldn't determine who to edit. Please try again.")
+        return
+
+    person = persons[0]
+    matches = repo.get_by_person(person, status="active")
+    if not matches:
+        await query.edit_message_text(f"No active obligation found for {person}.")
+        return
+
+    if len(matches) > 1 and context is not None:
+        await _show_disambiguation(query, matches, action_data, context, person)
+        return
+
+    await _execute_edit_single(query, matches[0], action_data)
+
+
+async def _execute_delete(query, persons, *, context=None, action_data=None):
+    """Execute a delete action, with disambiguation if needed."""
     if not persons:
         await query.edit_message_text(
             "Couldn't determine which obligation to delete."
@@ -362,6 +546,11 @@ async def _execute_delete(query, persons):
         if not matches:
             results.append(f"No active obligation found for {person}.")
             continue
+
+        if len(matches) > 1 and context is not None and action_data is not None:
+            await _show_disambiguation(query, matches, action_data, context, person)
+            return
+
         repo.delete(matches[0].id)
         results.append(f"Deleted obligation for {person}.")
 
